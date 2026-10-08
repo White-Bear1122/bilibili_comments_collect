@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bilibili 评论爬取</title>
+  <link rel="stylesheet" href="/static/style.css">
+
+</head>
+<body>
+<div class="wrap">
+  <h1>Bilibili 评论爬取</h1>
+  <div class="sub">输入 BV 号分页拉取评论，可按用户名筛选，收集单条楼层，或把当前已加载内容导出为 Excel。</div>
+
+  <div class="bar">
+    <input id="bv" type="text" placeholder="视频 BV 号，例如 BV1xx411c7mD" autocomplete="off">
+    <button id="btnFetch" onclick="fetchVideo(true)">开始爬取</button>
+  </div>
+
+  <div id="info" class="info" style="display:none"></div>
+
+  <div class="bar">
+    <input id="user" type="text" placeholder="按用户名筛选（主评论或回复中出现即保留）">
+    <button class="ghost" onclick="searchUser()">筛选</button>
+    <button class="ghost" onclick="clearFilter()">显示全部</button>
+    <button class="ghost" id="btnExcel" onclick="exportExcel()" disabled>导出 Excel</button>
+  </div>
+
+  <div id="list"></div>
+  <div id="more" style="text-align:center;margin-top:8px;display:none">
+    <button class="ghost" id="btnMore" onclick="loadMore()">加载下一页</button>
+  </div>
+</div>
+<div id="toast" class="toast"></div>
+<script>
+let loaded = [];
+let showing = [];
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 2200);
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function render(comments) {
+  showing = comments;
+  const box = document.getElementById('list');
+  if (!comments.length) {
+    box.innerHTML = '<div class="empty">没有评论</div>';
+    return;
+  }
+  box.innerHTML = comments.map(c => `
+    <div class="comment">
+      <div class="head">
+        <strong>${esc(c.user)}</strong>
+        <span>${c.like} 赞</span>
+        <span>${esc(c.ctime)}</span>
+        <span>回复 ${c.reply_count || (c.replies||[]).length}</span>
+      </div>
+      <div class="content">${esc(c.content)}</div>
+      <div class="actions">
+        <button class="collect" onclick="collectOne(${c.rpid})">收集此评论及全部回复</button>
+      </div>
+      ${(c.replies && c.replies.length) ? `
+        <div class="replies">
+          ${c.replies.map(r => `<div class="sub"><strong>${esc(r.user)}</strong> · ${r.like}赞 · ${esc(r.ctime)}<br>${esc(r.content)}</div>`).join('')}
+        </div>` : ''}
+    </div>
+  `).join('');
+}
+
+async function fetchVideo(reset) {
+  const bv = document.getElementById('bv').value.trim();
+  if (!bv) return toast('请输入 BV 号');
+  const btn = document.getElementById('btnFetch');
+  btn.disabled = true;
+  btn.textContent = '拉取中...';
+  try {
+    const res = await fetch('/api/fetch', { method:'POST', body: new URLSearchParams({ bv, reset: reset ? '1' : '0' }) });
+    const data = await res.json();
+    if (data.status !== 'ok') { toast(data.message || '失败'); return; }
+    loaded = data.comments;
+    document.getElementById('info').style.display = 'block';
+    document.getElementById('info').innerHTML =
+      `<b>${esc(data.title)}</b><br>BV：${esc(data.bv)}　已加载主评论 ${data.total} 条${data.has_more ? '（还可继续加载）' : '（已到末页）'}`;
+    document.getElementById('more').style.display = data.has_more ? 'block' : 'none';
+    document.getElementById('btnExcel').disabled = data.total === 0;
+    render(loaded);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '开始爬取';
+  }
+}
+
+async function loadMore() {
+  const btn = document.getElementById('btnMore');
+  btn.disabled = true;
+  btn.textContent = '加载中...';
+  try {
+    const res = await fetch('/api/more', { method:'POST' });
+    const data = await res.json();
+    if (data.status !== 'ok') { toast(data.message || '失败'); return; }
+    loaded = data.comments;
+    document.getElementById('info').innerHTML =
+      `<b>${esc(data.title)}</b><br>BV：${esc(data.bv)}　已加载主评论 ${data.total} 条${data.has_more ? '（还可继续加载）' : '（已到末页）'}`;
+    document.getElementById('more').style.display = data.has_more ? 'block' : 'none';
+    document.getElementById('btnExcel').disabled = data.total === 0;
+    const keyword = document.getElementById('user').value.trim();
+    if (keyword) await searchUser();
+    else render(loaded);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '加载下一页';
+  }
+}
+
+async function searchUser() {
+  const username = document.getElementById('user').value.trim();
+  const res = await fetch('/api/filter', { method:'POST', body: new URLSearchParams({ username }) });
+  const data = await res.json();
+  if (data.status !== 'ok') { toast(data.message || '失败'); return; }
+  render(data.comments);
+  toast(`筛选到 ${data.comments.length} 条主评论`);
+}
+
+function clearFilter() {
+  document.getElementById('user').value = '';
+  render(loaded);
+}
+
+async function collectOne(rpid) {
+  const res = await fetch('/api/collect', { method:'POST', body: new URLSearchParams({ rpid: String(rpid) }) });
+  const data = await res.json();
+  toast(data.message || (data.status === 'ok' ? '已保存' : '失败'));
+}
+
+async function exportExcel() {
+  const btn = document.getElementById('btnExcel');
+  btn.disabled = true;
+  try {
+    const username = document.getElementById('user').value.trim();
+    const res = await fetch('/api/export', { method:'POST', body: new URLSearchParams({ username }) });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.message || '导出失败');
+      return;
+    }
+    const blob = await res.blob();
+    const disp = res.headers.get('Content-Disposition') || '';
+    const m = disp.match(/filename=\"?([^\";]+)\"?/);
+    const name = m ? decodeURIComponent(m[1]) : 'bilibili_comments.xlsx';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('Excel 已开始下载');
+  } finally {
+    btn.disabled = loaded.length === 0;
+  }
+}
+</script>
+</body>
+</html>
